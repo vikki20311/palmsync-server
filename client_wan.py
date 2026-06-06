@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Palmsync – Gesture Controlled Secure File Transfer (WAN Relay Version)
-Final Year Project Demo – Works over Internet via HTTP Relay Server
+Palmsync – Gesture Controlled Secure File Transfer (WAN)
+Complete client with progress bar, gestures, and receiver confirmation.
 """
 
 import os
@@ -28,19 +28,19 @@ import requests
 import win32gui
 import win32process
 import win32con
-import pygetwindow as gw
 
-# Keyboard simulation for URL grabbing
+# URL grabbing
 from pynput.keyboard import Key, Controller as KeyboardController
 
 # ========== CONFIGURATION ==========
-RELAY_SERVER = "https://your-app.onrender.com"  # ← Replace with your Render URL
-DEVICE_ID = None  # Set via command-line or input
-POLL_INTERVAL = 2.0  # Seconds between checking for incoming transfers
+RELAY_SERVER = "https://palmsync-relay-xxxxxx-uc.a.run.app"  # REPLACE with your URL
+DEVICE_ID = None
+POLL_INTERVAL = 2.0
 GESTURE_COOLDOWN = 0.8
 AUTO_SEND_DELAY = 5.0
 GESTURE_CONFIRM_FRAMES = 5
 INCOMING_TIMEOUT = 10.0
+CHUNK_SIZE = 1024 * 1024  # 1MB chunks
 
 # ========== GLOBAL STATE ==========
 class State:
@@ -48,7 +48,7 @@ class State:
         self.running = True
         self.current_gesture = "none"
         self.device_id = DEVICE_ID
-        self.remote_peers = []  # list of {'device_id': str, 'ip': str}
+        self.remote_peers = []
         self.selected_peer = None
         self.detected_content = None
         self.send_queue = queue.Queue()
@@ -56,15 +56,12 @@ class State:
         self.popup_active = False
         self.gesture_counter = 0
         self.last_gesture_time = 0
-        # For receiving
-        self.incoming_file = None
         self.incoming_popup = None
-        self.incoming_transfer_id = None
         self.is_sending = False
 
 state = State()
 
-# ========== CONTENT DETECTION (unchanged from LAN version) ==========
+# ========== CONTENT DETECTION ==========
 def get_active_window_info():
     try:
         hwnd = win32gui.GetForegroundWindow()
@@ -149,7 +146,6 @@ def take_screenshot():
 
 # ========== WAN RELAY CLIENT ==========
 def register_device():
-    """Register this device with the relay server."""
     try:
         response = requests.post(f"{RELAY_SERVER}/api/register", json={'device_id': state.device_id}, timeout=5)
         return response.status_code == 200
@@ -158,26 +154,22 @@ def register_device():
         return False
 
 def keepalive():
-    """Send keepalive to stay online."""
     try:
         requests.post(f"{RELAY_SERVER}/api/keepalive", json={'device_id': state.device_id}, timeout=3)
     except:
         pass
 
 def fetch_peers():
-    """Get list of online peers from relay server."""
     try:
         response = requests.get(f"{RELAY_SERVER}/api/peers", timeout=5)
         if response.status_code == 200:
             peers = response.json()
-            # Remove self
             return [p for p in peers if p['device_id'] != state.device_id]
         return []
     except:
         return []
 
 def initiate_transfer(receiver_id, file_path, filename, file_size):
-    """Initiate a transfer on the relay server."""
     try:
         response = requests.post(f"{RELAY_SERVER}/api/transfer/initiate", json={
             'filename': filename,
@@ -192,17 +184,15 @@ def initiate_transfer(receiver_id, file_path, filename, file_size):
         return None
 
 def upload_chunk(transfer_id, index, data):
-    """Upload a chunk to the relay server."""
     try:
         files = {'chunk': ('chunk', data)}
-        data = {'transfer_id': transfer_id, 'index': index}
-        response = requests.post(f"{RELAY_SERVER}/api/transfer/upload_chunk", data=data, files=files, timeout=10)
+        form_data = {'transfer_id': transfer_id, 'index': index}
+        response = requests.post(f"{RELAY_SERVER}/api/transfer/upload_chunk", data=form_data, files=files, timeout=10)
         return response.status_code == 200
     except:
         return False
 
 def download_chunks(transfer_id, total_chunks, save_path):
-    """Download all chunks and assemble the file."""
     try:
         with open(save_path, 'wb') as f:
             for i in range(total_chunks):
@@ -219,7 +209,6 @@ def download_chunks(transfer_id, total_chunks, save_path):
         return False
 
 def check_incoming_transfers():
-    """Poll the server for pending transfers for this device."""
     try:
         response = requests.get(
             f"{RELAY_SERVER}/api/transfer/incoming",
@@ -236,7 +225,6 @@ def check_incoming_transfers():
         return []
 
 def accept_transfer_remote(transfer_id):
-    """Accept a transfer on the server."""
     try:
         requests.post(f"{RELAY_SERVER}/api/transfer/accept", json={'transfer_id': transfer_id}, timeout=5)
         return True
@@ -244,7 +232,6 @@ def accept_transfer_remote(transfer_id):
         return False
 
 def reject_transfer_remote(transfer_id):
-    """Reject a transfer on the server."""
     try:
         requests.post(f"{RELAY_SERVER}/api/transfer/reject", json={'transfer_id': transfer_id}, timeout=5)
         return True
@@ -252,14 +239,13 @@ def reject_transfer_remote(transfer_id):
         return False
 
 def complete_transfer_remote(transfer_id):
-    """Mark a transfer as complete on the server."""
     try:
         requests.post(f"{RELAY_SERVER}/api/transfer/complete", json={'transfer_id': transfer_id}, timeout=5)
         return True
     except:
         return False
 
-# ========== GESTURE DETECTION (unchanged) ==========
+# ========== GESTURE DETECTION ==========
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 hands = mp_hands.Hands(
@@ -330,24 +316,14 @@ def camera_thread():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(frame, f"Conf: {gesture_counter}/{GESTURE_CONFIRM_FRAMES}", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(
-                    frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
-                    mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
-                    mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
-                )
         cv2.imshow('Palmsync', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             state.running = False
     cap.release()
     cv2.destroyAllWindows()
 
-# ========== POLLING THREAD (for incoming transfers) ==========
+# ========== POLLING THREAD ==========
 def polling_thread():
-    """Periodically check for incoming transfers."""
     while state.running:
         if state.device_id:
             try:
@@ -356,7 +332,7 @@ def polling_thread():
                 pass
         time.sleep(POLL_INTERVAL)
 
-# ========== INCOMING POPUP (Receiver Side) ==========
+# ========== INCOMING POPUP ==========
 class IncomingPopup:
     def __init__(self, root, transfer_info, accept_callback, reject_callback):
         self.root = root
@@ -365,38 +341,26 @@ class IncomingPopup:
         self.reject_callback = reject_callback
         self.active = True
         self.timeout_id = None
-        
         self.window = tk.Toplevel(root)
         self.window.title("Incoming Transfer")
         self.window.geometry("450x250")
         self.window.protocol("WM_DELETE_WINDOW", self.reject)
-        
         label = ttk.Label(self.window, text="📥 Incoming File Transfer", font=("Arial", 14, "bold"))
         label.pack(pady=10)
-        
-        sender_text = f"From: {transfer_info['sender']}"
-        file_text = f"File: {transfer_info['filename']}"
-        size_text = f"Size: {transfer_info['size'] / (1024*1024):.2f} MB"
-        
-        ttk.Label(self.window, text=sender_text, font=("Arial", 11)).pack(pady=2)
-        ttk.Label(self.window, text=file_text, font=("Arial", 11)).pack(pady=2)
-        ttk.Label(self.window, text=size_text, font=("Arial", 11)).pack(pady=2)
-        
+        ttk.Label(self.window, text=f"From: {transfer_info['sender']}", font=("Arial", 11)).pack(pady=2)
+        ttk.Label(self.window, text=f"File: {transfer_info['filename']}", font=("Arial", 11)).pack(pady=2)
+        ttk.Label(self.window, text=f"Size: {transfer_info['size'] / (1024*1024):.2f} MB", font=("Arial", 11)).pack(pady=2)
         ttk.Label(self.window, text="\nGestures:", font=("Arial", 10)).pack(pady=5)
         ttk.Label(self.window, text="  • Fist → Accept", font=("Arial", 10)).pack()
         ttk.Label(self.window, text="  • Palm → Reject", font=("Arial", 10)).pack()
         ttk.Label(self.window, text="  (or press Y/N on keyboard)", font=("Arial", 10)).pack()
-        
         self.timer_label = ttk.Label(self.window, text=f"Waiting... (timeout in {INCOMING_TIMEOUT:.0f}s)", font=("Arial", 9))
         self.timer_label.pack(pady=10)
-        
         self.start_time = time.time()
         self.update_timer()
-        
         self.window.bind('<Key-y>', lambda e: self.accept())
         self.window.bind('<Key-n>', lambda e: self.reject())
         self.window.focus_set()
-        
     def update_timer(self):
         if not self.active:
             return
@@ -407,7 +371,6 @@ class IncomingPopup:
             self.reject()
         else:
             self.timeout_id = self.window.after(1000, self.update_timer)
-    
     def accept(self):
         if not self.active:
             return
@@ -416,7 +379,6 @@ class IncomingPopup:
             self.window.after_cancel(self.timeout_id)
         self.window.destroy()
         self.accept_callback(self.transfer_info)
-    
     def reject(self):
         if not self.active:
             return
@@ -426,42 +388,34 @@ class IncomingPopup:
         self.window.destroy()
         self.reject_callback(self.transfer_info)
 
-# ========== SENDER POPUP GUI (with Progress Bar) ==========
+# ========== SENDER POPUP GUI ==========
 class PopupGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Palmsync – Gesture Transfer")
         self.root.geometry("500x450")
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
-        
         self.content_label = ttk.Label(root, text="Detected: None", font=("Arial", 12))
         self.content_label.pack(pady=10)
-        
         self.peer_listbox = tk.Listbox(root, font=("Consolas", 11), height=6)
         self.peer_listbox.pack(fill=tk.BOTH, expand=True, padx=20, pady=5)
-        
         self.status_label = ttk.Label(root, text="Waiting for gesture...", font=("Arial", 10))
         self.status_label.pack(pady=5)
-        
         self.progress_frame = ttk.Frame(root)
         self.progress_frame.pack(fill=tk.X, padx=20, pady=5)
-        
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(self.progress_frame, variable=self.progress_var, maximum=100)
         self.progress_bar.pack(fill=tk.X, pady=2)
-        
         self.info_frame = ttk.Frame(self.progress_frame)
         self.info_frame.pack(fill=tk.X)
         self.percent_label = ttk.Label(self.info_frame, text="0%", font=("Arial", 9))
         self.percent_label.pack(side=tk.LEFT)
         self.speed_label = ttk.Label(self.info_frame, text="0 MB/s", font=("Arial", 9))
         self.speed_label.pack(side=tk.RIGHT)
-        
         self.send_button = ttk.Button(root, text="Send Now (Manual)", command=self.manual_send)
         self.send_button.pack(pady=5)
         self.abort_button = ttk.Button(root, text="Abort", command=self.abort)
         self.abort_button.pack(pady=5)
-        
         self.active = False
         self.selected_peer = None
         self.peers = []
@@ -478,14 +432,12 @@ class PopupGUI:
         self.percent_label.config(text="0%")
         self.speed_label.config(text="0 MB/s")
         self.status_label.config(text="Waiting for gesture...")
-        
         if content['type'] == 'file':
             self.content_label.config(text=f"📄 File: {content['title']}")
         elif content['type'] == 'url':
             self.content_label.config(text=f"🌐 URL: {content['title']}")
         else:
             self.content_label.config(text=f"📸 Screenshot: {content['title']}")
-        
         self.peer_listbox.delete(0, tk.END)
         for idx, peer in enumerate(peers):
             self.peer_listbox.insert(tk.END, f"{peer['device_id']} ({peer['ip']})")
@@ -535,7 +487,6 @@ class PopupGUI:
         threading.Thread(target=self._send_thread, args=(peer, content), daemon=True).start()
 
     def _send_thread(self, peer, content):
-        # Prepare file
         if content['type'] == 'file':
             file_path = content['path']
         elif content['type'] == 'url':
@@ -543,24 +494,18 @@ class PopupGUI:
             temp.write(content['path'])
             temp.close()
             file_path = temp.name
-        else:  # screenshot
+        else:
             file_path = content['path']
-        
         file_size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
-        
-        # Initiate transfer on relay server
         transfer_id = initiate_transfer(peer['device_id'], file_path, filename, file_size)
         if not transfer_id:
             self.root.after(0, self._send_result, False, "Failed to initiate transfer")
             return
-        
-        # Upload chunks
-        chunk_size = 1024 * 1024  # 1MB
+        chunk_size = CHUNK_SIZE
         total_chunks = (file_size + chunk_size - 1) // chunk_size
         sent = 0
         start_time = time.time()
-        
         with open(file_path, 'rb') as f:
             for i in range(total_chunks):
                 chunk = f.read(chunk_size)
@@ -575,8 +520,6 @@ class PopupGUI:
                 elapsed = time.time() - start_time
                 speed = sent / elapsed / (1024 * 1024) if elapsed > 0 else 0
                 self.root.after(0, self._update_progress, progress, speed)
-        
-        # Mark as complete on server
         complete_transfer_remote(transfer_id)
         self.root.after(0, self._send_result, True, "Sent successfully!")
 
@@ -626,29 +569,19 @@ def main():
         DEVICE_ID = sys.argv[1]
     else:
         DEVICE_ID = input("Enter your device ID (e.g., 'laptop_a'): ").strip()
-    
     state.device_id = DEVICE_ID
-    
-    # Register with relay server
     if not register_device():
         print("[ERROR] Could not connect to relay server.")
         return
-    
-    # Start threads
-    threading.Thread(target=start_discovery_server, daemon=True).start()
     threading.Thread(target=camera_thread, daemon=True).start()
     threading.Thread(target=polling_thread, daemon=True).start()
-    
-    # Keepalive thread
     def keepalive_thread():
         while state.running:
             keepalive()
             time.sleep(10)
     threading.Thread(target=keepalive_thread, daemon=True).start()
-    
     root = tk.Tk()
     gui = PopupGUI(root)
-    
     def process_queues():
         try:
             while True:
@@ -664,13 +597,11 @@ def main():
                         handle_gesture(gesture, gui)
         except queue.Empty:
             pass
-        
         try:
             while True:
                 item = state.receive_queue.get_nowait()
                 if item[0] == 'show_incoming':
                     info = item[1]
-                    state.incoming_transfer_id = info['transfer_id']
                     state.incoming_popup = IncomingPopup(
                         root,
                         info,
@@ -685,12 +616,10 @@ def main():
                         root.after(3000, gui.hide)
         except queue.Empty:
             pass
-        
         root.after(100, process_queues)
-    
     root.after(100, process_queues)
     print("\n" + "="*50)
-    print("Palmsync Gesture Transfer (WAN Relay Version)")
+    print("Palmsync Gesture Transfer (WAN)")
     print(f"Device ID: {state.device_id}")
     print(f"Relay Server: {RELAY_SERVER}")
     print("Open palm → discover & send")
@@ -725,12 +654,9 @@ def handle_gesture(gesture, gui):
             gui.abort()
 
 def receive_accept_callback(transfer_info):
-    """Accept incoming file from relay server."""
     transfer_id = transfer_info['transfer_id']
     filename = transfer_info['filename']
     file_size = transfer_info['size']
-    
-    # Get total chunks from server
     try:
         response = requests.get(f"{RELAY_SERVER}/api/transfer/status", params={'transfer_id': transfer_id}, timeout=5)
         if response.status_code == 200:
@@ -740,15 +666,10 @@ def receive_accept_callback(transfer_info):
             return
     except:
         return
-    
-    # Accept on server
     accept_transfer_remote(transfer_id)
-    
-    # Download chunks and assemble
     downloads = Path.home() / 'Downloads'
     downloads.mkdir(exist_ok=True)
     save_path = downloads / f"received_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
-    
     success = download_chunks(transfer_id, total_chunks, save_path)
     if success:
         print(f"[RECEIVE] File saved: {save_path}")
@@ -757,15 +678,9 @@ def receive_accept_callback(transfer_info):
         print("[RECEIVE] Download failed.")
 
 def receive_reject_callback(transfer_info):
-    """Reject incoming file."""
     transfer_id = transfer_info['transfer_id']
     reject_transfer_remote(transfer_id)
     print("[RECEIVE] Transfer rejected by user.")
-
-# ========== Dummy function (kept for compatibility) ==========
-def start_discovery_server():
-    """Not used for WAN, but kept for compatibility."""
-    pass
 
 if __name__ == "__main__":
     main()

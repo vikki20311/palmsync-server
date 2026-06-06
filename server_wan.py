@@ -1,18 +1,15 @@
-from flask import Flask, request, jsonify
-from datetime import datetime, timedelta
-import uuid
 import os
+import uuid
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB
 
-# In-memory storage
-peers = {}  # device_id -> {'ip': request.remote_addr, 'last_seen': datetime}
-transfers = {}  # transfer_id -> {'filename': str, 'size': int, 'sender': str, 'receiver': str,
-                #              'chunks': {index: bytes}, 'status': 'pending'|'accepted'|'rejected'|'completed',
-                #              'created_at': datetime, 'total_chunks': int, 'chunk_size': int}
-# For demo, we store chunks in memory. For larger files, use temp files.
+# In‑memory storage (resets on restart – fine for demo)
+peers = {}
+transfers = {}
 
 @app.route('/')
 def home():
@@ -32,7 +29,6 @@ def register():
 
 @app.route('/api/peers', methods=['GET'])
 def list_peers():
-    # Only return peers active in last 30 seconds
     cutoff = datetime.utcnow() - timedelta(seconds=30)
     active_peers = [
         {'device_id': pid, 'ip': info['ip']}
@@ -57,15 +53,11 @@ def initiate_transfer():
     size = data.get('size')
     sender = data.get('sender')
     receiver = data.get('receiver')
-    
     if not all([filename, size, sender, receiver]):
         return jsonify({'error': 'missing fields'}), 400
-    
     transfer_id = str(uuid.uuid4())
-    # Use 1MB chunks for demo
-    chunk_size = 1024 * 1024
+    chunk_size = 1024 * 1024  # 1MB
     total_chunks = (size + chunk_size - 1) // chunk_size
-    
     transfers[transfer_id] = {
         'filename': secure_filename(filename),
         'size': size,
@@ -84,13 +76,10 @@ def upload_chunk():
     transfer_id = request.form.get('transfer_id')
     index = int(request.form.get('index'))
     file_data = request.files.get('chunk')
-    
     if not all([transfer_id, index, file_data]):
         return jsonify({'error': 'missing fields'}), 400
-    
     if transfer_id not in transfers:
         return jsonify({'error': 'transfer not found'}), 404
-    
     transfers[transfer_id]['chunks'][index] = file_data.read()
     return jsonify({'status': 'ok'})
 
@@ -98,14 +87,11 @@ def upload_chunk():
 def download_chunk():
     transfer_id = request.args.get('transfer_id')
     index = int(request.args.get('index'))
-    
     if transfer_id not in transfers:
         return jsonify({'error': 'transfer not found'}), 404
-    
     chunk_data = transfers[transfer_id]['chunks'].get(index)
     if chunk_data is None:
         return jsonify({'error': 'chunk not found'}), 404
-    
     return chunk_data, 200, {'Content-Type': 'application/octet-stream'}
 
 @app.route('/api/transfer/status', methods=['GET'])
@@ -149,7 +135,6 @@ def complete_transfer():
     if transfer_id not in transfers:
         return jsonify({'error': 'not found'}), 404
     transfers[transfer_id]['status'] = 'completed'
-    # Clean up chunks to free memory (for demo)
     transfers[transfer_id]['chunks'].clear()
     return jsonify({'status': 'completed'})
 
@@ -158,7 +143,6 @@ def incoming_transfers():
     device_id = request.args.get('device_id')
     if not device_id:
         return jsonify({'error': 'device_id required'}), 400
-    
     incoming = []
     for tid, t in transfers.items():
         if t['receiver'] == device_id and t['status'] == 'pending':
