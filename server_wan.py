@@ -9,7 +9,7 @@ from werkzeug.utils import secure_filename
 logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB limit
 
 # In-memory storage (resets on restart – fine for demo)
 peers = {}
@@ -97,13 +97,11 @@ def download_chunk():
     if transfer_id not in transfers:
         app.logger.warning(f"Transfer {transfer_id} not found")
         return jsonify({'error': 'transfer not found'}), 404
-    
     chunk_data = transfers[transfer_id]['chunks'].get(index)
     if chunk_data is None:
         available = list(transfers[transfer_id]['chunks'].keys())
         app.logger.warning(f"Chunk {index} not found for transfer {transfer_id}. Available chunks: {available}")
         return jsonify({'error': 'chunk not found'}), 404
-    
     app.logger.debug(f"Downloading chunk {index} for transfer {transfer_id}")
     return chunk_data, 200, {'Content-Type': 'application/octet-stream'}
 
