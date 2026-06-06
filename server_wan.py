@@ -1,13 +1,17 @@
 import os
 import uuid
+import logging
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 
+# Setup logging
+logging.basicConfig(level=logging.DEBUG)
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB
 
-# In‑memory storage (resets on restart – fine for demo)
+# In-memory storage (resets on restart – fine for demo)
 peers = {}
 transfers = {}
 
@@ -25,6 +29,7 @@ def register():
         'ip': request.remote_addr,
         'last_seen': datetime.utcnow()
     }
+    app.logger.info(f"Registered device: {device_id} from {request.remote_addr}")
     return jsonify({'status': 'registered'})
 
 @app.route('/api/peers', methods=['GET'])
@@ -69,6 +74,7 @@ def initiate_transfer():
         'total_chunks': total_chunks,
         'chunk_size': chunk_size
     }
+    app.logger.info(f"Transfer initiated: {transfer_id} ({filename}, {size} bytes, {total_chunks} chunks)")
     return jsonify({'transfer_id': transfer_id})
 
 @app.route('/api/transfer/upload_chunk', methods=['POST'])
@@ -81,6 +87,7 @@ def upload_chunk():
     if transfer_id not in transfers:
         return jsonify({'error': 'transfer not found'}), 404
     transfers[transfer_id]['chunks'][index] = file_data.read()
+    app.logger.debug(f"Chunk {index} uploaded for transfer {transfer_id}")
     return jsonify({'status': 'ok'})
 
 @app.route('/api/transfer/download_chunk', methods=['GET'])
@@ -88,10 +95,16 @@ def download_chunk():
     transfer_id = request.args.get('transfer_id')
     index = int(request.args.get('index'))
     if transfer_id not in transfers:
+        app.logger.warning(f"Transfer {transfer_id} not found")
         return jsonify({'error': 'transfer not found'}), 404
+    
     chunk_data = transfers[transfer_id]['chunks'].get(index)
     if chunk_data is None:
+        available = list(transfers[transfer_id]['chunks'].keys())
+        app.logger.warning(f"Chunk {index} not found for transfer {transfer_id}. Available chunks: {available}")
         return jsonify({'error': 'chunk not found'}), 404
+    
+    app.logger.debug(f"Downloading chunk {index} for transfer {transfer_id}")
     return chunk_data, 200, {'Content-Type': 'application/octet-stream'}
 
 @app.route('/api/transfer/status', methods=['GET'])
@@ -117,6 +130,7 @@ def accept_transfer():
     if transfer_id not in transfers:
         return jsonify({'error': 'not found'}), 404
     transfers[transfer_id]['status'] = 'accepted'
+    app.logger.info(f"Transfer {transfer_id} accepted")
     return jsonify({'status': 'accepted'})
 
 @app.route('/api/transfer/reject', methods=['POST'])
@@ -126,6 +140,7 @@ def reject_transfer():
     if transfer_id not in transfers:
         return jsonify({'error': 'not found'}), 404
     transfers[transfer_id]['status'] = 'rejected'
+    app.logger.info(f"Transfer {transfer_id} rejected")
     return jsonify({'status': 'rejected'})
 
 @app.route('/api/transfer/complete', methods=['POST'])
@@ -135,7 +150,8 @@ def complete_transfer():
     if transfer_id not in transfers:
         return jsonify({'error': 'not found'}), 404
     transfers[transfer_id]['status'] = 'completed'
-    transfers[transfer_id]['chunks'].clear()
+    transfers[transfer_id]['chunks'].clear()  # Free memory
+    app.logger.info(f"Transfer {transfer_id} completed")
     return jsonify({'status': 'completed'})
 
 @app.route('/api/transfer/incoming', methods=['GET'])
