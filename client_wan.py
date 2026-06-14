@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Palmsync WAN Client – Complete fixed version
+Palmsync WAN Client – Complete fixed version with server verification
 """
 
 import os
@@ -573,11 +573,28 @@ class PopupGUI:
                 speed = sent / elapsed / (1024 * 1024) if elapsed > 0 else 0
                 self.root.after(0, self._update_progress, progress, speed)
         
-        # Mark transfer as completed
-        if complete_transfer_remote(transfer_id):
-            print("✅ Transfer completion reported to server.")
-        else:
-            print("❌ Transfer completion failed.")
+        # ✅ Verify that the server has all chunks before marking as complete
+        print("✅ Verifying server has all chunks...")
+        time.sleep(2)  # Allow server time to process
+        try:
+            verify_response = requests.get(f"{RELAY_SERVER}/api/transfer/status", params={'transfer_id': transfer_id}, timeout=5)
+            if verify_response.status_code == 200:
+                data = verify_response.json()
+                if data['received_chunks'] == total_chunks:
+                    print(f"✅ Server has all {total_chunks} chunks.")
+                    # Mark transfer as completed
+                    if complete_transfer_remote(transfer_id):
+                        print("✅ Transfer completion reported to server.")
+                    else:
+                        print("❌ Transfer completion failed.")
+                else:
+                    print(f"⚠️ Server only has {data['received_chunks']}/{total_chunks} chunks. Upload may have failed.")
+                    self.root.after(0, self._send_result, False, "Incomplete upload")
+                    return
+            else:
+                print(f"⚠️ Could not verify upload status: {verify_response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Exception during verification: {e}")
         
         time.sleep(1)
         self.root.after(0, self._send_result, True, "Sent successfully!")

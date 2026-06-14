@@ -83,7 +83,6 @@ def upload_chunk():
     index = request.args.get('index')
     file_data = request.files.get('chunk')
     
-    # Log received data for debugging
     app.logger.info(f"Upload request: transfer_id={transfer_id}, index={index}, chunk={file_data is not None}")
     
     if not all([transfer_id, index, file_data]):
@@ -101,10 +100,11 @@ def upload_chunk():
         app.logger.warning(f"Empty chunk data for transfer {transfer_id}, index {index}")
         return jsonify({'error': 'empty chunk'}), 400
     
+    # ✅ Store the chunk in the dictionary
     transfers[transfer_id]['chunks'][index] = chunk_data
     app.logger.info(f"Chunk {index} uploaded for transfer {transfer_id} (size: {len(chunk_data)} bytes)")
     
-    # Verify the chunk was stored
+    # ✅ Verify the chunk was stored immediately
     if index not in transfers[transfer_id]['chunks']:
         app.logger.error(f"Chunk {index} not stored properly!")
         return jsonify({'error': 'storage failed'}), 500
@@ -168,7 +168,8 @@ def complete_transfer():
     if transfer_id not in transfers:
         return jsonify({'error': 'not found'}), 404
     transfers[transfer_id]['status'] = 'completed'
-    transfers[transfer_id]['chunks'].clear()
+    # Do NOT clear chunks here. Keep them so the receiver can download.
+    # transfers[transfer_id]['chunks'].clear()  # ← Commented out
     app.logger.info(f"Transfer {transfer_id} completed")
     return jsonify({'status': 'completed'})
 
