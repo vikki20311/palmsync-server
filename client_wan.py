@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Palmsync – Gesture Controlled Secure File Transfer (WAN)
-Complete client with progress bar, gestures, and receiver confirmation.
+Palmsync WAN Client – Complete fixed version (upload via query params)
 """
 
 import os
@@ -12,35 +11,26 @@ import queue
 import tempfile
 from datetime import datetime
 from pathlib import Path
-
-# GUI
 import tkinter as tk
 from tkinter import ttk
-
-# Computer vision
 import cv2
 import mediapipe as mp
-
-# HTTP for WAN
 import requests
-
-# Windows specific
+import psutil
 import win32gui
 import win32process
 import win32con
-
-# URL grabbing
 from pynput.keyboard import Key, Controller as KeyboardController
 
 # ========== CONFIGURATION ==========
-RELAY_SERVER = "https://palmsync-relay-xxxxxx-uc.a.run.app"  # REPLACE with your URL
+RELAY_SERVER = "https://palmsync-server-87421486014.asia-south1.run.app"  # ← YOUR URL
 DEVICE_ID = None
 POLL_INTERVAL = 2.0
 GESTURE_COOLDOWN = 0.8
 AUTO_SEND_DELAY = 5.0
 GESTURE_CONFIRM_FRAMES = 5
 INCOMING_TIMEOUT = 10.0
-CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+CHUNK_SIZE = 1024 * 1024  # 1MB
 
 # ========== GLOBAL STATE ==========
 class State:
@@ -145,12 +135,20 @@ def take_screenshot():
     return temp.name
 
 # ========== WAN RELAY CLIENT ==========
+def test_server_connection():
+    try:
+        response = requests.get(RELAY_SERVER, timeout=10)
+        print(f"✅ Server connection: {response.status_code} - {response.text.strip()}")
+        return True
+    except Exception as e:
+        print(f"❌ Server connection failed: {e}")
+        return False
+
 def register_device():
     try:
         response = requests.post(f"{RELAY_SERVER}/api/register", json={'device_id': state.device_id}, timeout=5)
         return response.status_code == 200
     except:
-        print("[WARN] Could not register with relay server.")
         return False
 
 def keepalive():
@@ -169,6 +167,13 @@ def fetch_peers():
     except:
         return []
 
+def warm_up_server():
+    try:
+        requests.get(RELAY_SERVER, timeout=10)
+        print("[WARMUP] Server ready")
+    except:
+        print("[WARMUP] Could not warm up server")
+
 def initiate_transfer(receiver_id, file_path, filename, file_size):
     try:
         response = requests.post(f"{RELAY_SERVER}/api/transfer/initiate", json={
@@ -176,7 +181,7 @@ def initiate_transfer(receiver_id, file_path, filename, file_size):
             'size': file_size,
             'sender': state.device_id,
             'receiver': receiver_id
-        }, timeout=5)
+        }, timeout=10)
         if response.status_code == 200:
             return response.json().get('transfer_id')
         return None
@@ -184,28 +189,52 @@ def initiate_transfer(receiver_id, file_path, filename, file_size):
         return None
 
 def upload_chunk(transfer_id, index, data):
+    """Upload a chunk using query parameters (fixes missing fields error)."""
     try:
-        files = {'chunk': ('chunk', data)}
-        form_data = {'transfer_id': transfer_id, 'index': index}
-        response = requests.post(f"{RELAY_SERVER}/api/transfer/upload_chunk", data=form_data, files=files, timeout=10)
-        return response.status_code == 200
-    except:
+        url = f"{RELAY_SERVER}/api/transfer/upload_chunk?transfer_id={transfer_id}&index={index}"
+        files = {'chunk': ('chunk.bin', data, 'application/octet-stream')}
+        response = requests.post(url, files=files, timeout=120)
+        if response.status_code == 200:
+            print(f"✅ Chunk {index} uploaded")
+            return True
+        else:
+            print(f"❌ Chunk {index} upload failed: Status {response.status_code}")
+            print(f"Server response: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Chunk {index} upload error: {e}")
         return False
 
 def download_chunks(transfer_id, total_chunks, save_path):
     try:
         with open(save_path, 'wb') as f:
             for i in range(total_chunks):
-                response = requests.get(
-                    f"{RELAY_SERVER}/api/transfer/download_chunk",
-                    params={'transfer_id': transfer_id, 'index': i},
-                    timeout=30
-                )
-                if response.status_code != 200:
+                success = False
+                retries = 3
+                while not success and retries > 0:
+                    try:
+                        response = requests.get(
+                            f"{RELAY_SERVER}/api/transfer/download_chunk",
+                            params={'transfer_id': transfer_id, 'index': i},
+                            timeout=30
+                        )
+                        if response.status_code == 200:
+                            f.write(response.content)
+                            print(f"✅ Chunk {i+1}/{total_chunks} downloaded")
+                            success = True
+                        else:
+                            print(f"⚠️ Chunk {i+1}/{total_chunks} failed: Status {response.status_code} (Retry {3-retries+1}/3)")
+                            time.sleep(1)
+                    except Exception as e:
+                        print(f"⚠️ Chunk {i+1}/{total_chunks} error: {e} (Retry {3-retries+1}/3)")
+                        time.sleep(1)
+                    retries -= 1
+                if not success:
+                    print(f"❌ Failed to download chunk {i+1}/{total_chunks}. Aborting.")
                     return False
-                f.write(response.content)
         return True
-    except:
+    except Exception as e:
+        print(f"❌ Unexpected error in download_chunks: {e}")
         return False
 
 def check_incoming_transfers():
@@ -245,7 +274,7 @@ def complete_transfer_remote(transfer_id):
     except:
         return False
 
-# ========== GESTURE DETECTION ==========
+# ========== GESTURE DETECTION (RELAXED) ==========
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 hands = mp_hands.Hands(
@@ -273,9 +302,9 @@ def detect_gesture(frame):
         return 'none'
     landmarks = results.multi_hand_landmarks[0]
     fingers = get_finger_states(landmarks)
-    if sum(fingers) == 5:
+    if sum(fingers) >= 4:
         return 'palm'
-    if sum(fingers[1:]) == 0:
+    if sum(fingers[1:]) <= 1:
         return 'fist'
     if fingers[1] == 1 and sum(fingers[2:]) == 0:
         return 'point'
@@ -498,6 +527,7 @@ class PopupGUI:
             file_path = content['path']
         file_size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
+        warm_up_server()
         transfer_id = initiate_transfer(peer['device_id'], file_path, filename, file_size)
         if not transfer_id:
             self.root.after(0, self._send_result, False, "Failed to initiate transfer")
@@ -511,9 +541,16 @@ class PopupGUI:
                 chunk = f.read(chunk_size)
                 if not chunk:
                     break
-                success = upload_chunk(transfer_id, i, chunk)
-                if not success:
-                    self.root.after(0, self._send_result, False, "Upload failed")
+                # Retry up to 3 times per chunk
+                for retry in range(3):
+                    success = upload_chunk(transfer_id, i, chunk)
+                    if success:
+                        break
+                    else:
+                        print(f"⚠️ Retry {retry+1}/3 for chunk {i}")
+                        time.sleep(2)
+                else:  # All retries failed
+                    self.root.after(0, self._send_result, False, f"Upload failed on chunk {i}")
                     return
                 sent += len(chunk)
                 progress = (sent / file_size) * 100
@@ -521,6 +558,7 @@ class PopupGUI:
                 speed = sent / elapsed / (1024 * 1024) if elapsed > 0 else 0
                 self.root.after(0, self._update_progress, progress, speed)
         complete_transfer_remote(transfer_id)
+        time.sleep(1)
         self.root.after(0, self._send_result, True, "Sent successfully!")
 
     def _update_progress(self, percent, speed):
@@ -570,9 +608,15 @@ def main():
     else:
         DEVICE_ID = input("Enter your device ID (e.g., 'laptop_a'): ").strip()
     state.device_id = DEVICE_ID
-    if not register_device():
-        print("[ERROR] Could not connect to relay server.")
+    
+    if not test_server_connection():
+        print("[ERROR] Cannot reach relay server. Check your internet and Cloud Run URL.")
         return
+    
+    if not register_device():
+        print("[ERROR] Could not register with relay server.")
+        return
+    
     threading.Thread(target=camera_thread, daemon=True).start()
     threading.Thread(target=polling_thread, daemon=True).start()
     def keepalive_thread():
@@ -657,20 +701,32 @@ def receive_accept_callback(transfer_info):
     transfer_id = transfer_info['transfer_id']
     filename = transfer_info['filename']
     file_size = transfer_info['size']
-    try:
-        response = requests.get(f"{RELAY_SERVER}/api/transfer/status", params={'transfer_id': transfer_id}, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            total_chunks = data['total_chunks']
-        else:
-            return
-    except:
+    
+    print("[RECEIVE] Waiting for upload to complete...")
+    for _ in range(5):
+        try:
+            response = requests.get(f"{RELAY_SERVER}/api/transfer/status", params={'transfer_id': transfer_id}, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if data['status'] == 'completed':
+                    print(f"[RECEIVE] Transfer completed. Total chunks: {data['total_chunks']}")
+                    break
+                else:
+                    print(f"[RECEIVE] Still uploading... (status: {data['status']})")
+            else:
+                print(f"[RECEIVE] Status check failed: {response.status_code}")
+        except Exception as e:
+            print(f"[RECEIVE] Status check exception: {e}")
+        time.sleep(2)
+    else:
+        print("[RECEIVE] ⏱️ Timeout waiting for upload to complete.")
         return
+    
     accept_transfer_remote(transfer_id)
     downloads = Path.home() / 'Downloads'
     downloads.mkdir(exist_ok=True)
     save_path = downloads / f"received_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
-    success = download_chunks(transfer_id, total_chunks, save_path)
+    success = download_chunks(transfer_id, data['total_chunks'], save_path)
     if success:
         print(f"[RECEIVE] File saved: {save_path}")
         state.receive_queue.put(('file_received', str(save_path)))

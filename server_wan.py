@@ -9,9 +9,9 @@ from werkzeug.utils import secure_filename
 logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB limit
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB
 
-# In-memory storage (resets on restart – fine for demo)
+# In-memory storage
 peers = {}
 transfers = {}
 
@@ -79,13 +79,19 @@ def initiate_transfer():
 
 @app.route('/api/transfer/upload_chunk', methods=['POST'])
 def upload_chunk():
-    transfer_id = request.form.get('transfer_id')
-    index = int(request.form.get('index'))
+    # ✅ FIX: Get parameters from query string instead of form data
+    transfer_id = request.args.get('transfer_id')
+    index = request.args.get('index')
     file_data = request.files.get('chunk')
+    
     if not all([transfer_id, index, file_data]):
+        app.logger.warning(f"Missing fields: transfer_id={transfer_id}, index={index}, chunk={file_data is not None}")
         return jsonify({'error': 'missing fields'}), 400
+    
+    index = int(index)
     if transfer_id not in transfers:
         return jsonify({'error': 'transfer not found'}), 404
+    
     transfers[transfer_id]['chunks'][index] = file_data.read()
     app.logger.debug(f"Chunk {index} uploaded for transfer {transfer_id}")
     return jsonify({'status': 'ok'})
@@ -102,7 +108,6 @@ def download_chunk():
         available = list(transfers[transfer_id]['chunks'].keys())
         app.logger.warning(f"Chunk {index} not found for transfer {transfer_id}. Available chunks: {available}")
         return jsonify({'error': 'chunk not found'}), 404
-    app.logger.debug(f"Downloading chunk {index} for transfer {transfer_id}")
     return chunk_data, 200, {'Content-Type': 'application/octet-stream'}
 
 @app.route('/api/transfer/status', methods=['GET'])
@@ -148,7 +153,7 @@ def complete_transfer():
     if transfer_id not in transfers:
         return jsonify({'error': 'not found'}), 404
     transfers[transfer_id]['status'] = 'completed'
-    transfers[transfer_id]['chunks'].clear()  # Free memory
+    transfers[transfer_id]['chunks'].clear()
     app.logger.info(f"Transfer {transfer_id} completed")
     return jsonify({'status': 'completed'})
 
