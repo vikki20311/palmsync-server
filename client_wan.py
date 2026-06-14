@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Palmsync WAN Client – Complete fixed version (upload via query params)
+Palmsync WAN Client – Complete fixed version
 """
 
 import os
@@ -26,7 +26,7 @@ from pynput.keyboard import Key, Controller as KeyboardController
 RELAY_SERVER = "https://palmsync-server-87421486014.asia-south1.run.app"  # ← YOUR URL
 DEVICE_ID = None
 POLL_INTERVAL = 2.0
-GESTURE_COOLDOWN = 0.8
+GESTURE_COOLDOWN = 5.0
 AUTO_SEND_DELAY = 5.0
 GESTURE_CONFIRM_FRAMES = 5
 INCOMING_TIMEOUT = 10.0
@@ -189,7 +189,6 @@ def initiate_transfer(receiver_id, file_path, filename, file_size):
         return None
 
 def upload_chunk(transfer_id, index, data):
-    """Upload a chunk using query parameters (fixes missing fields error)."""
     try:
         url = f"{RELAY_SERVER}/api/transfer/upload_chunk?transfer_id={transfer_id}&index={index}"
         files = {'chunk': ('chunk.bin', data, 'application/octet-stream')}
@@ -211,6 +210,7 @@ def download_chunks(transfer_id, total_chunks, save_path):
             for i in range(total_chunks):
                 success = False
                 retries = 3
+                print(f"Downloading chunk {i} (index {i})")
                 while not success and retries > 0:
                     try:
                         response = requests.get(
@@ -269,12 +269,18 @@ def reject_transfer_remote(transfer_id):
 
 def complete_transfer_remote(transfer_id):
     try:
-        requests.post(f"{RELAY_SERVER}/api/transfer/complete", json={'transfer_id': transfer_id}, timeout=5)
-        return True
-    except:
+        response = requests.post(f"{RELAY_SERVER}/api/transfer/complete", json={'transfer_id': transfer_id}, timeout=5)
+        if response.status_code == 200:
+            print(f"✅ Transfer {transfer_id} marked as completed on server.")
+            return True
+        else:
+            print(f"❌ Transfer {transfer_id} completion failed: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Transfer {transfer_id} completion exception: {e}")
         return False
 
-# ========== GESTURE DETECTION (RELAXED) ==========
+# ========== GESTURE DETECTION ==========
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 hands = mp_hands.Hands(
@@ -302,12 +308,19 @@ def detect_gesture(frame):
         return 'none'
     landmarks = results.multi_hand_landmarks[0]
     fingers = get_finger_states(landmarks)
+    
+    # Palm: at least 4 fingers open
     if sum(fingers) >= 4:
         return 'palm'
-    if sum(fingers[1:]) <= 1:
-        return 'fist'
+    
+    # Point: index open, middle/ring/pinky closed (thumb can be open or closed)
     if fingers[1] == 1 and sum(fingers[2:]) == 0:
         return 'point'
+    
+    # Fist: all 4 main fingers closed (thumb can be open or closed)
+    if sum(fingers[1:]) == 0:
+        return 'fist'
+    
     return 'none'
 
 def camera_thread():
@@ -525,6 +538,7 @@ class PopupGUI:
             file_path = temp.name
         else:
             file_path = content['path']
+        
         file_size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
         warm_up_server()
@@ -532,16 +546,17 @@ class PopupGUI:
         if not transfer_id:
             self.root.after(0, self._send_result, False, "Failed to initiate transfer")
             return
+        
         chunk_size = CHUNK_SIZE
         total_chunks = (file_size + chunk_size - 1) // chunk_size
         sent = 0
         start_time = time.time()
+        
         with open(file_path, 'rb') as f:
             for i in range(total_chunks):
                 chunk = f.read(chunk_size)
                 if not chunk:
                     break
-                # Retry up to 3 times per chunk
                 for retry in range(3):
                     success = upload_chunk(transfer_id, i, chunk)
                     if success:
@@ -549,7 +564,7 @@ class PopupGUI:
                     else:
                         print(f"⚠️ Retry {retry+1}/3 for chunk {i}")
                         time.sleep(2)
-                else:  # All retries failed
+                else:
                     self.root.after(0, self._send_result, False, f"Upload failed on chunk {i}")
                     return
                 sent += len(chunk)
@@ -557,7 +572,13 @@ class PopupGUI:
                 elapsed = time.time() - start_time
                 speed = sent / elapsed / (1024 * 1024) if elapsed > 0 else 0
                 self.root.after(0, self._update_progress, progress, speed)
-        complete_transfer_remote(transfer_id)
+        
+        # Mark transfer as completed
+        if complete_transfer_remote(transfer_id):
+            print("✅ Transfer completion reported to server.")
+        else:
+            print("❌ Transfer completion failed.")
+        
         time.sleep(1)
         self.root.after(0, self._send_result, True, "Sent successfully!")
 
@@ -703,6 +724,7 @@ def receive_accept_callback(transfer_info):
     file_size = transfer_info['size']
     
     print("[RECEIVE] Waiting for upload to complete...")
+    data = None
     for _ in range(5):
         try:
             response = requests.get(f"{RELAY_SERVER}/api/transfer/status", params={'transfer_id': transfer_id}, timeout=5)

@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB
 
-# In-memory storage
+# In-memory storage (resets on restart – fine for demo)
 peers = {}
 transfers = {}
 
@@ -79,21 +79,36 @@ def initiate_transfer():
 
 @app.route('/api/transfer/upload_chunk', methods=['POST'])
 def upload_chunk():
-    # ✅ FIX: Get parameters from query string instead of form data
     transfer_id = request.args.get('transfer_id')
     index = request.args.get('index')
     file_data = request.files.get('chunk')
     
+    # Log received data for debugging
+    app.logger.info(f"Upload request: transfer_id={transfer_id}, index={index}, chunk={file_data is not None}")
+    
     if not all([transfer_id, index, file_data]):
-        app.logger.warning(f"Missing fields: transfer_id={transfer_id}, index={index}, chunk={file_data is not None}")
+        app.logger.warning("Missing fields in upload_chunk")
         return jsonify({'error': 'missing fields'}), 400
     
     index = int(index)
     if transfer_id not in transfers:
+        app.logger.warning(f"Transfer {transfer_id} not found")
         return jsonify({'error': 'transfer not found'}), 404
     
-    transfers[transfer_id]['chunks'][index] = file_data.read()
-    app.logger.debug(f"Chunk {index} uploaded for transfer {transfer_id}")
+    # ✅ CRITICAL FIX: Read the chunk data and store it
+    chunk_data = file_data.read()
+    if not chunk_data:
+        app.logger.warning(f"Empty chunk data for transfer {transfer_id}, index {index}")
+        return jsonify({'error': 'empty chunk'}), 400
+    
+    transfers[transfer_id]['chunks'][index] = chunk_data
+    app.logger.info(f"Chunk {index} uploaded for transfer {transfer_id} (size: {len(chunk_data)} bytes)")
+    
+    # Verify the chunk was stored
+    if index not in transfers[transfer_id]['chunks']:
+        app.logger.error(f"Chunk {index} not stored properly!")
+        return jsonify({'error': 'storage failed'}), 500
+    
     return jsonify({'status': 'ok'})
 
 @app.route('/api/transfer/download_chunk', methods=['GET'])
